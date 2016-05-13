@@ -1,0 +1,111 @@
+#!/usr/bin/perl -w 
+
+use FindBin;
+use lib "$FindBin::Bin/../../perl_lib";
+
+# generate symplectic_xwalks_toolkit_config_eprints.xml
+
+use EPrints;
+use XML::LibXSLT;
+use XML::LibXML;
+use Time::Piece; # to write generation date into comment
+
+use strict;
+
+my $repoid = $ARGV[0];
+if( !defined $repoid ){
+	print STDERR "USAGE: $0 ARCHIVEID [multiple-elements-system-id]\n";
+	exit 1;
+}
+
+my $session = new EPrints::Session( 1 , $repoid );
+if( !defined $session )
+{
+	print STDERR "Failed to load repository: $repoid\n";
+	exit 1;
+}
+
+if (defined Symplectic::ConfigurationManager->get_value('session' => $session, 'name' => "multiple.elements.systems"))
+{
+        if (!defined $ARGV[1])
+        {
+                print STDERR "Multiple elements systems configured, but elements system id not passed\n";
+                exit( 1 );
+        }
+
+        $session->{'elements_system'} = $ARGV[1];
+}
+
+my $crosswalksdir = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => "syrtug.test.xwalks.dir" );
+if( !-d $crosswalksdir ){
+	print STDERR "Crosswalks directory from configuration:\n\t$crosswalksdir\ndoes not exist. Please check config in cfg.d/symplectic_* files\n";
+	exit 1;
+}
+
+my $crosswalk = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => "syrtug.test.xwalks.default" );
+if( !defined $crosswalk ){
+	print STDERR "No 'syrtug.test.xwalks.default' found in config. Please check for 'syrtug.test.xwalks.default' config in cfg.d/symplectic_* files\n";
+	exit 1;
+}
+
+if( !-e $crosswalksdir.$crosswalk ){
+	print STDERR "No crosswalk found at $crosswalksdir$crosswalk\n";
+	exit 1;
+}
+
+my $xslt = XML::LibXSLT->new();
+my $style_doc = XML::LibXML->load_xml( location=> $crosswalksdir.$crosswalk, no_cdata=>1 );
+my $stylesheet = $xslt->parse_stylesheet( $style_doc );
+
+if( !defined $stylesheet ){
+	print STDERR "Couldn't parse $crosswalksdir$crosswalk into LibXSLT\n";
+	exit 1;
+}
+
+my $test_urls_filename = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => "syrtug.test.xwalks.infile" );
+if( !defined $test_urls_filename ){
+	print STDERR "Test URLs filename not found in config. Please check for config variable 'syrtug.test.xwalks.infile'.";
+	exit 1;
+}
+
+if( !-e "$crosswalksdir$test_urls_filename" ){
+	print STDERR "Test URLs file not found: $crosswalksdir$test_urls_filename\n";
+	exit 1;
+}
+
+my $test_output_dir = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => "syrtug.test.xwalks.outdir" );
+if( !defined $test_output_dir ){
+	print STDERR "Test output directory name not found in config. Please check for config variable 'syrtug.test.xwalks.outdir'.";
+	exit 1;
+}
+if( !-e "$crosswalksdir$test_output_dir" ){
+	print STDERR "Test output directory not found: $crosswalksdir$test_output_dir\n";
+	print STDERR "Please make directory: $crosswalksdir$test_output_dir or check config variable 'syrtug.test.xwalks.outdir'\n";
+	exit 1;
+}
+
+print "OK... looks like we've got ourselves an XSLT party!\n\tTime to get the records to be tested!\n";
+
+open my $handle, '<', "$crosswalksdir$test_urls_filename";
+chomp( my @urls = <$handle>);
+close $handle;
+
+foreach my $url (@urls){
+	next if $url =~ /^#/;
+	next if $url =~ /^\s*$/;
+	print "About to process $url\n";
+	my ($pid) = $url =~ /^.*?\/(\d+)$/;
+	print "\tpid: $pid\n";
+
+	my $xml = XML::LibXML->load_xml(location => $url);
+	my $sourcefilename = "$crosswalksdir$test_output_dir/$pid.source.xml";
+	my $resultfilename = "$crosswalksdir$test_output_dir/$pid.result.xml";
+	$xml->toFile( $sourcefilename, 1 );
+	my $result = $stylesheet->transform( $xml );
+	
+	$stylesheet->output_file( $result, $resultfilename );
+
+	print "Processed $pid.\n Source xml:\t$sourcefilename\n Result xml:\t$resultfilename\n\n";
+}
+
+$session->terminate();

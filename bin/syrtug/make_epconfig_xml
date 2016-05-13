@@ -1,0 +1,127 @@
+#!/usr/bin/perl -w 
+
+use FindBin;
+use lib "$FindBin::Bin/../../perl_lib";
+
+# This script generates the symplectic xwalks toolkit config file that describes the EPrints structure
+# It takes values for the filenames from the confif - possibly cfg.d/symplectic_99_syrtug.pl
+
+use EPrints;
+use XML::LibXML;
+use Time::Piece; # to write generation date into comment
+
+use strict;
+
+my $repoid = $ARGV[0];
+if( !defined $repoid ){
+	print STDERR "USAGE: $0 ARCHIVEID\n";
+	exit 1;
+}
+
+my $session = new EPrints::Session( 1 , $repoid );
+if( !defined $session )
+{
+	print STDERR "Failed to load repository: $repoid\n";
+	exit 1;
+}
+
+# xwalks.dir has a trailing slash.
+my $config_file_dir = $session->get_conf( "pubs", "xwalks.dir" );
+if( !defined $config_file_dir ){
+	print STDERR "No crosswalks directory configuration. Please check for 'xwalks.dir' config in cfg.d/symplectic_* files\n";
+	exit 1;
+}
+if( !-d $config_file_dir ){
+	print STDERR "Crosswalks directory from configuration:\n\t$config_file_dir\ndoes not exist. Please check config in cfg.d/symplectic_* files\n";
+	exit 1;
+}
+
+my $config_file_name = $session->get_conf( "pubs", "syrtug.xwalks.epconfig_filename" );
+
+if( !defined $config_file_name ){
+	print STDERR "No 'epconfig_filename' found in config. Please check for 'syrtug.xwalks.epconfig_filename' config in cfg.d/symplectic_* files\n";
+	exit 1;
+}
+if( !-e "$config_file_dir$config_file_name" ){
+	print STDERR "No epconfig file exists\n\t$config_file_dir$config_file_name\nI will create it now.\n";
+}
+
+my $ns = 'http://www.symplectic.co.uk/ep3/config';
+my $doc = XML::LibXML::Document->new('1.0','UTF-8');
+my $epconfig = $doc->createElement("epconfig");
+$epconfig->setNamespace( $ns, "epconfig", 0 );
+$doc->setDocumentElement($epconfig);
+
+my $date = my $todayUtc = gmtime->datetime();
+my $creationComment = $doc->createComment( "\n\tThis config file was created using\n\t\t$0\n\tat $date\n" );
+
+$epconfig->appendChild( $creationComment );
+
+my $fields = $doc->createElement( "epconfig:fields" );
+$epconfig->appendChild( $fields );
+
+my $dataset = $session->dataset( "eprint" );
+
+foreach my $field ( $dataset->fields )
+{
+	next if defined $field->{parent}; # skip subfields
+
+	my $config_field = $doc->createElement( "epconfig:field" );
+	$fields->appendChild( $config_field );
+	$config_field->setAttribute( "name", $field->name );
+	$config_field->setAttribute( "type", $field->type );
+	$config_field->setAttribute( "multiple", "true" ) if $field->property( "multiple" );
+
+	if( $field->type eq "compound" )
+	{
+		foreach my $subfield ( @{ $field->property( "fields" ) } )
+		{
+			my $config_subfield = $doc->createElement( "epconfig:subfield" );
+			$config_field->appendChild( $config_subfield );
+			$config_subfield->setAttribute( "name", $subfield->{sub_name} );
+			$config_subfield->setAttribute( "type", $subfield->{type} );
+		}
+	}
+
+}
+
+if( $doc->toFile( $config_file_dir.$config_file_name, 1 ) ){
+	print "********************\n";
+	print "\tConfig file written OK:\n\t$config_file_dir$config_file_name.\n";
+	print "********************\n";
+	print "Please check crosswalks include reference to:\n\t<xsl:variable name=\"config-eprints-file\">$config_file_name</xsl:variable>\n";
+	print "********************\n";
+} else {
+	print STDERR "Config file not written to\n\t$config_file_dir$config_file_name.\n";
+}
+
+
+my $test_config_file_dir = $session->get_conf( "pubs", "syrtug.test.xwalks.dir" );
+if( !defined $test_config_file_dir ){
+	print "No test crosswalks directory configuration. If you want to create a config file for test crosswalks please check for 'syrtug.test.xwalks.dir' config in cfg.d/symplectic_* files\n";
+	$session->terminate();
+	exit 0;
+}
+if( $config_file_dir eq $test_config_file_dir ){
+	print "Test and live crosswalks directories are the same - no additional config file created.\n";
+	$session->terminate();
+	exit 0;
+}
+
+
+if( !-d $test_config_file_dir ){
+	print STDERR "\n\nTest crosswalks directory from configuration:\n\t$test_config_file_dir\n directory does not exist. Please check config in cfg.d/symplectic_* files\n";
+	$session->terminate();
+	exit 1;
+}
+
+if( $doc->toFile( $test_config_file_dir.$config_file_name, 1 ) ){
+	print "********************\n";
+	print "Test crosswalks config file written OK:\n\t$test_config_file_dir$config_file_name.\n\n";
+	print "********************\n";
+	print "Check test crosswalks include reference to:\n\t<xsl:variable name=\"config-eprints-file\">$config_file_name</xsl:variable>\n";
+	print "********************\n";
+} else {
+	print STDERR "Test config file not written to\n\t$test_config_file_dir$config_file_name.\n";
+}
+$session->terminate();
