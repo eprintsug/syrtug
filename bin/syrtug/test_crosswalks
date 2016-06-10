@@ -1,7 +1,7 @@
 #!/usr/bin/perl -w 
 
 use FindBin;
-use lib "$FindBin::Bin/../../perl_lib";
+use lib "$FindBin::Bin/../../../../perl_lib";
 
 # generate symplectic_xwalks_toolkit_config_eprints.xml
 
@@ -94,7 +94,7 @@ foreach my $url (@urls){
 	next if $url =~ /^#/;
 	next if $url =~ /^\s*$/;
 	print "About to process $url\n";
-	my ($pid) = $url =~ /^.*?\/(\d+)$/;
+	my ($pid) = $url =~ /^.*?\/(\d+)(|\.xml)$/;
 	print "\tpid: $pid\n";
 
 	my $xml = XML::LibXML->load_xml(location => $url);
