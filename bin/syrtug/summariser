@@ -226,11 +226,11 @@ if( defined $email ){
 	my $result = EPrints::Email::send_mail(
 		session => $session,
 		langid => $session->get_langid,
-                to_email => $email,
-                to_name => $email,
-                subject => $session->phrase( "syrtug_summary_email:subject" ),
+		to_email => $email,
+		to_name => $email,
+		subject => $session->phrase( "syrtug_summary_email:subject" ),
 		message => $mail,
-                sig => $session->html_phrase( "mail_sig" ),
+		sig => $session->html_phrase( "mail_sig" ),
 	);
 
 	print "Email sent to $email\n";	
