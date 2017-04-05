@@ -1,0 +1,333 @@
+#!/usr/bin/perl -w
+
+use FindBin;
+use lib "$FindBin::Bin/../../perl_lib";
+use File::Temp;
+use File::Copy;
+
+use EPrints;
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+
+use Data::Dumper;
+
+use Symplectic::ConfigurationManager;
+use Symplectic::RepoProcess::ListHoldings;
+
+use XML::LibXML;
+use XML::LibXML::XPathContext;
+
+my $repoid = $ARGV[0];
+my $debug = 0;
+my $elements_system; #for multiple-symplectic-to-one-repository configs
+my $number_to_process; # when testing, only process a certain number of records
+my $number_to_skip = 0; # when testing, skip a number of records (returned from the symplectic_pids data)
+my @pids; # array of specific Symplectic pids to process (if you're trying to troubleshoot certain records)
+GetOptions(
+	'debug' => \$debug,
+	'elements-system=s' => \$elements_system,
+	'number-to-process=i' => \$number_to_process,
+	'number-to-skip=i' => \$number_to_skip,
+	'pid=i' => \@pids,
+);
+
+# Set STDOUT to auto flush (without needing a \n)
+$|=1;
+
+if( !defined $repoid ){
+	print "USAGE: $0 ARCHIVEID [--number-to-process n --number-to-skip n --pid PID --pid PID --elements-system [system] ]\n";
+	print "The number to process/skip is useful for testing - e.g. to check the first 5 records work, without processing everything.\n";
+	print "The '--pid' option can be repeated to process a batch of known Symplectic records - e.g. merged records, or records with 'interesting' data in them.\n";
+	exit 1;
+}
+
+# get a session on the relevant repository
+my $session = new EPrints::Session(1 , $repoid, 0);
+exit( 1 ) unless( defined $session );
+
+if (defined Symplectic::ConfigurationManager->get_value('session' => $session, 'name' => "multiple.elements.systems"))
+{
+	if (!defined $elements_system)
+	{
+		print STDERR "Multiple elements systems configured, but elements system id not passed\n";
+		exit( 1 );
+	}
+	
+	$session->{'elements_system'} = $elements_system;
+}
+
+my $output_directory = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-output-directory' );
+if( !-e $output_directory ){
+	print STDERR "Output directory $output_directory does not exist. Please check config: syrtug.summary-output-directory.\n";
+	exit( 1 );
+}
+my $output_file = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-output-filename' );
+if( !defined $output_file ){
+	print STDERR "Output filename not specified in configuration. Please check config: syrtug.summary-output-filename.\n";
+	exit( 1 );
+}
+
+#NB the email not being set isn't an error - if they don't want an email alert.
+my $email = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-email' );
+
+# temp file to write to
+my $fh = File::Temp->new( TEMPLATE => "sympXXXXXX", DIR=> "/tmp", SUFFIX=>".csv" );
+binmode( $fh, ":utf8" );
+
+my $rt_url = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'url.list-updated' );
+$rt_url =~ s/list-publications$/publication\//;
+print STDERR "Base publications URL: $rt_url\n" if $debug;
+
+my $data_from_atom = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-fields-atom' );
+if( !$data_from_atom ){
+	print STDERR "No config for syrtug.summary-fields-atom. Please check config.\n";
+	exit( 1 );
+}
+
+my $data_from_eprint = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-fields-eprint' );
+if( !$data_from_eprint ){
+	print STDERR "No config for syrtug.summary-fields-eprint. Please check config.\n";
+	exit( 1 );
+}
+my $data_process = Symplectic::ConfigurationManager->get_value( 'session' => $session, 'name' => 'syrtug.summary-fields-process' );
+
+# define which order data will be output in
+# We output processed columns before data columns - as these flags are probably more important to see first?
+my $columns = {
+	A_DAO => [  qw( pid eprint_id submission_eprint_id ) ],
+	B_PROC => [ sort keys %$data_process ],
+	C_EP => [ keys %$data_from_eprint ],
+	D_SYMP => [ sort keys %$data_from_atom ],
+};
+
+print $fh column_headings( $columns );
+
+my $dao = Symplectic::DAO::PublicationsRecordDAO->new('session' => $session);
+my @records = $dao->get_all; # possibly need to page this - but need to make sure that references to merged records would be stable across pages!
+
+my $count = 0+@records;
+
+my $processed = 0;
+print STDERR "Number of records to process: $count.\n" if $debug;
+
+if( $number_to_skip > 0 ){
+	print STDERR "Skipping first $number_to_skip records.\n" if $debug;
+	splice @records, 0, $number_to_skip; 
+}
+
+if( @pids ){
+	print STDERR "Processing selected pids...\n" if $debug;
+}
+
+my $merged_records = {};
+my $merged_to_records = {};
+my $merged_to_conflict_records = {};
+my $merged_from_records = {};
+my $merged_from_conflict_records = {};
+
+foreach my $record (@records){
+	$processed++;
+	print STDERR sprintf("% 3s%%\r", sprintf("%d", $processed / $count * 100)) if $debug;
+
+	last if ( defined $number_to_process ) && $processed > $number_to_process;
+
+	my( $pid, $eprintid, $submission_eprintid );
+	$pid = $record->pid;
+
+	# if we're processing a sub-batch defined above, @pids will be defined. 
+	if( @pids ){
+		next unless (grep {$_ == $pid } @pids );
+	}
+
+	$eprintid = $record->eprint_id;
+	$submission_eprintid = $record->submission_eprint_id;
+	my $url = $rt_url.$pid;
+
+	my $eprint = EPrints::DataObj::EPrint->new( $session, $eprintid );
+	if( !defined $eprint ){
+		print "ERROR: pid $pid maps to EPrint $eprintid, but EPrint does not exist.\n";
+		next; 
+	}
+
+	print "Processing pid: $pid...\n" if $debug;
+	my $atom_details = process_url( $url );
+	my $eprint_details = {};
+	my $processed_details ={};
+
+	foreach my $key (keys %$data_from_eprint ){
+
+		if( ref($data_from_eprint->{$key}) eq "CODE" )
+                {
+                        $eprint_details->{$key} = &{$data_from_eprint->{$key}}( $eprint );
+                }
+		elsif( $eprint->exists_and_set( $data_from_eprint->{$key} ) )
+		{
+			$eprint_details->{$key} = $eprint->value( $data_from_eprint->{$key} );
+		}
+		else
+		{ 
+			print "UNDEF FIELD ",$data_from_eprint->{$key}," ???\n" if $debug;
+			$eprint_details->{$key} = undef;
+		}
+	}
+
+	foreach my $key (keys %$data_process ){
+		# merge-to and merge-from are keys (so they are ordered in the output fields), but not coderefs.
+		if( defined( $data_process->{$key} ) && ref( $data_process->{$key} ) eq "CODE" ){
+			$processed_details->{$key} = &{$data_process->{$key}}( $atom_details->{$key}, $eprint_details->{$key}, $debug );
+		}
+	}
+
+	#process merges
+	foreach my $merge_type ( qw/ merge_from merge_to / ){
+		if( defined $atom_details->{$merge_type} ){
+			print "$merge_type MERGES: ", $atom_details->{$merge_type}, "\n" if $debug;
+			my $merge_ids = $atom_details->{$merge_type};
+
+			$merge_ids = [ $merge_ids ] if ref( $merge_ids ) ne 'ARRAY';
+			foreach my $merge_id ( @$merge_ids ){
+				if( grep { $_->pid == $merge_id } @records ){
+					$processed_details->{$merge_type} = 1;
+				}
+			}
+		}
+	}
+
+	print $fh column_data( 
+		$columns,
+		{ pid => $pid, eprint_id =>$eprintid, submission_eprint_id => $submission_eprintid },
+		$processed_details,
+		$eprint_details,
+		$atom_details
+	);	
+
+}
+
+close $fh; #make sure data is written before trying to copy it.
+#Copy $fh to destination
+if( !File::Copy::copy( "$fh","$output_directory/$output_file" ) ){
+	print STDERR "Copy failed: $!\n";
+	$fh->unlink_on_destroy( 0 );
+	print STDERR "Data should be retained in ",$fh->filename,"\n";
+}
+
+#sent acknowledgement email
+if( defined $email ){
+	my $base = $session->config( 'htdocs_path' ).'/'.$session->config( 'defaultlanguage' );	
+	my $path = $output_directory;
+	$path =~ s/$base//;
+	my $url = $session->config( 'http_url' )."$path/$output_file";
+
+	my $mail = $session->make_element( "mail" );
+	$mail->appendChild( $session->html_phrase( "syrtug_summary_email:body", url => $session->make_text( $url ) ) );
+	my $result = EPrints::Email::send_mail(
+		session => $session,
+		langid => $session->get_langid,
+                to_email => $email,
+                to_name => $email,
+                subject => $session->phrase( "syrtug_summary_email:subject" ),
+		message => $mail,
+                sig => $session->html_phrase( "mail_sig" ),
+	);
+
+	print "Email sent to $email\n";	
+}
+
+$session->terminate();
+exit;
+
+sub process_url
+{
+	my( $url ) = @_;
+
+	print "Getting $url\n" if $debug;
+	my $dom = XML::LibXML->load_xml( location => $url );
+
+	my $xpc = XML::LibXML::XPathContext->new( $dom );
+	$xpc->registerNs( atom => 'http://www.w3.org/2005/Atom' );
+	$xpc->registerNs( pubs => 'http://www.symplectic.co.uk/publications/atom-api' );
+
+	my $feed = $dom->documentElement();
+
+	my $details = {};
+	foreach my $key (keys %$data_from_atom ){
+		print $key, $data_from_atom->{$key},"\n" if $debug;
+		my @nodes = $xpc->findnodes($data_from_atom->{$key});
+		
+		if( scalar @nodes == 1 ){
+			$details->{$key} = $nodes[0]->textContent;
+		} elsif( scalar @nodes > 1 ){
+			foreach( @nodes ){
+				push( @{$details->{$key}}, $_->textContent );
+			}
+		} else {
+			$details->{$key} = undef;
+		} 
+	}
+
+	return $details;
+}
+
+sub column_headings
+{
+	my( $cols ) = @_;
+	my $col_head = '';
+	foreach my $prefix (sort keys %$cols ){
+		# keys contain a prefix to allow ordering A_, B_ etc.
+		# the substr removes this.
+		# Joins the column names together with tabs
+		$col_head .= join( "\t", ( map { substr( $prefix, 2)."_".$_ } @{ $cols->{$prefix} } ) );
+		#add tab after last one, before next group
+		$col_head .=  "\t";
+	}
+
+	$col_head =~ s/\t$/\n/;
+
+	return $col_head;
+}
+sub column_data
+{
+	my( $cols, $dao, $proc, $ep, $symp ) = @_;
+
+	my $col_data = '';
+	foreach my $prefix (sort keys %$cols ){
+		# keys contain a prefix to allow ordering A_, B_ etc.
+		# the substr removes this.
+		my $data_hash = lc substr( $prefix, 2 );
+
+		if( $data_hash eq 'dao' ){
+			$col_data .= join( "\t", ( map { format_data( $dao->{$_} ) } @{ $cols->{$prefix} } ) );
+		} 
+		elsif( $data_hash eq 'proc' ){
+			$col_data .= join( "\t", ( map { format_data( $proc->{$_} ) } @{ $cols->{$prefix} } ) );
+		} 
+		elsif( $data_hash eq 'ep' ){
+			$col_data .= join( "\t", ( map { format_data( $ep->{$_} ) } @{ $cols->{$prefix} } ) );
+		} 
+		elsif( $data_hash eq 'symp' ){
+			$col_data .= join( "\t", ( map { format_data( $symp->{$_} ) } @{ $cols->{$prefix} } ) );
+		} 
+		
+		#add tab after last one, before next group
+		$col_data .=  "\t";
+	}
+
+	$col_data =~ s/\t$/\n/;
+
+	return $col_data;
+}
+
+sub format_data
+{
+	my( $data ) = @_;
+	return '' if !defined $data;
+
+	if( ref $data eq "ARRAY" ){
+		return join( ";", @$data );
+	}
+	$data =~ s/[\r\n\t]/ /g;
+	return $data;
+}

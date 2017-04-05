@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!DOCTYPE phrases SYSTEM "entities.dtd">
+<epp:phrases xmlns="http://www.w3.org/1999/xhtml" xmlns:epp="http://eprints.org/ep3/phrase" xmlns:epc="http://eprints.org/ep3/control">
+<!-- Phrases for SyRT-UG / Symplectic / Repo Tools stuff -->
+  <epp:phrase id="syrtug_summary_email:subject">Symplectic summary</epp:phrase>
+  <epp:phrase id="syrtug_summary_email:body"><p>A new Symplectic summary has been created. Please see: <epc:pin name="url"/></p></epp:phrase>
+
+</epp:phrases>
