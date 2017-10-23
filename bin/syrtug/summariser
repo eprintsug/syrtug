@@ -206,13 +206,15 @@ foreach my $record (@records){
 
 }
 
-close $fh; #make sure data is written before trying to copy it.
+$fh->flush; #make sure data is written before trying to copy it.
 #Copy $fh to destination
 if( !File::Copy::copy( "$fh","$output_directory/$output_file" ) ){
 	print STDERR "Copy failed: $!\n";
 	$fh->unlink_on_destroy( 0 );
 	print STDERR "Data should be retained in ",$fh->filename,"\n";
 }
+
+close( $fh );
 
 #sent acknowledgement email
 if( defined $email ){
