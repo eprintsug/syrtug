@@ -1,0 +1,178 @@
+#!/usr/bin/perl -w
+
+use FindBin;
+use lib "$FindBin::Bin/../../../perl_lib";
+
+use strict;
+use warnings;
+use Text::CSV;
+use Getopt::Long;
+use Pod::Usage;
+
+use EPrints;
+my $eprintid;
+my $nofilter;
+my $version = 0;
+my $verbose = 0;
+my $help = 0;
+my $man = 0;
+
+Getopt::Long::Configure("permute");
+
+GetOptions( 
+	'help|?' => \$help,
+	'man' => \$man,
+	'verbose+' => \$verbose,
+	'nofilter' => \$nofilter,
+	'eprintid=s' => \$eprintid,
+);
+
+# || pod2usage( 2 );
+#pod2usage( 1 ) if $help;
+#pod2usage( -exitstatus => 0, -verbose => 2 ) if $man;
+#pod2usage( 2 ) if( scalar @ARGV != 1 ); 
+
+my $repositoryid = $ARGV[0];
+my $output_file = $ARGV[1];
+
+unless($output_file) {die("Please supply an filename to output the results to");}
+
+
+#### Repo stuff ####
+my $ep = EPrints->new();
+my $repo = $ep->repository($repositoryid);
+unless($repo) {die("could not find repository with id: $repositoryid");}
+
+#history dataset not indexable... So dirty sql it is...
+my $sql = "select historyid,objectid from history where datasetid = 'eprint' and actor like '%lift_embargos'";
+$sql.=" and objectid = $eprintid " if(defined $eprintid);
+#order by timestamp to make sure we assess each lift embargo event in cronologically
+$sql.=" order by objectid, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second";
+
+my @rows;
+my $sth = $repo->get_database->prepare_select( $sql );
+$repo->get_database->execute( $sth , $sql );
+my $found = $sth->rows();
+
+my $objectid_field = $repo->dataset("history")->get_field( "objectid" );
+my $historyid_field = $repo->dataset("history")->get_field( "historyid" );
+
+$repo->log("$found lift_embargo events found...");
+
+#keep per eprint flag for compliance
+my $hoa_comp = {};
+
+my $csv = Text::CSV->new ( {
+         binary => 1,      # should set binary attribute.
+         eol    => $/,     # end of line character
+}) or die "Cannot use CSV: ".Text::CSV->error_diag ();
+open my $fh, ">:encoding(utf8)", $output_file or die "$output_file: $!";
+
+$csv->print($fh, [qw/eprintid 
+		main 
+		content
+		pub_time 
+		foa_timestamp 
+		embargi_length
+		hoa_exclude
+		hoa_ex_dep 
+		hoa_ex_dep_txt
+		hoa_ex_acc
+		hoa_ex_acc_txt
+		hoa_ex_tec 
+		hoa_ex_tec_txt
+		hoa_ex_oth   
+		hoa_ex_oth_txt 
+/]);
+
+#Loop through the histor events returned by the SQL
+while( my @row = $sth->fetchrow_array )
+{
+   my $historyid = $historyid_field->value_from_sql_row( $repo, \@row );
+   my $eprintid = $objectid_field->value_from_sql_row( $repo, \@row );
+
+  # We have an FOA and embargo length calculated for this iitem no need to process further
+   next if $hoa_comp->{$eprintid};
+
+   #Get the history object
+   $repo->dataset("history")->list([$historyid])->map ( sub {
+   	my( undef, undef, $history ) = @_;
+
+		#Get the revision data associated with the lift_embargo event
+	        my $rev_obj = $history->get_stored_file( "dataobj.xml" );
+	        if(!defined $rev_obj){
+			$repo->log("Revision file not found...");
+		}
+        	my $rev_file = $rev_obj->get_local_copy;
+		if(!defined $rev_file){
+			#This happens rarely, I think only when a once embargoed 
+			#item has since had the document removed... There is an 
+			#object and a revision file, but no association with between the two
+			$repo->log("Revision file not found for ".$history->get_id." (".$history->value("revision").")");
+			return;
+		}
+		#This timestamp will be the date that the embargo was lifted
+		my $timestamp = Time::Piece->strptime( $history->value("timestamp"), "%Y-%m-%d %H:%M:%S");
+		#We'll want the eprint object in question to get some key dates from that
+		my ($eprint) = $repo->get_dataset("eprint")->list([$eprintid])->get_records( 0, 1 );
+		#Can we depend on this being there?
+		my $hoa_pub = $eprint->value("hoa_date_pub");
+		#We'll use the same mthods and criteria that the REF_CC uses.
+		#First thing is to get a calcuable publication time
+		my $pub_time;
+		if( $repo->can_call( "hefce_oa", "handle_possibly_incomplete_date" ) )
+		{
+			$pub_time = $repo->call( [ "hefce_oa", "handle_possibly_incomplete_date" ], $hoa_pub );
+		}
+		if( !defined( $pub_time ) ) #above call can return undef - fallback to default
+		{
+			$pub_time = Time::Piece->strptime( $hoa_pub , "%Y-%m-%d" );
+		}
+
+		#We'll need to look in that revision file to assess the state of play when the embargo was lifted
+		my $doc = XML::LibXML->load_xml(location => $rev_file);
+		my $xpc = XML::LibXML::XPathContext->new( $doc );
+		$xpc->registerNs( "ep" => "http://eprints.org/ep2/data/2.0" );
+
+		# Check documents to see if there is *any* document that meets the FOA criteria
+		for my $item ( $xpc->findnodes('//ep:document') ) {
+			my $i_xpc = XML::LibXML::XPathContext->new( $item ); #boring!
+			$i_xpc->registerNs( "ep" => "http://eprints.org/ep2/data/2.0" );
+			#FOA critera as expressed by REF CC plugin
+			if($i_xpc->find('ep:content')->to_literal eq "accepted" || 
+				$i_xpc->find('ep:content')->to_literal eq "published" && 
+				$i_xpc->find('ep:security')->to_literal eq "public"){
+
+					#Lets get some data and put it in a CSV file
+					my $doc_main = $i_xpc->find('ep:main')->to_literal;
+					my $content = $i_xpc->find('ep:content')->to_literal;
+					my $len = $timestamp-$pub_time;
+					my $emb_len = sprintf "%.0f", $len->months;
+					$csv->print($fh,[$eprintid,
+							$doc_main,
+							$content,
+							$pub_time,
+							$timestamp,
+							$emb_len,
+							$eprint->value("hoa_exclude"),
+							$eprint->value("hoa_ex_dep"),
+							$eprint->value("hoa_ex_dep_txt"),
+							$eprint->value("hoa_ex_acc"),
+							$eprint->value("hoa_ex_acc_txt"),
+							$eprint->value("hoa_ex_tec"), 
+							$eprint->value("hoa_ex_tec_txt"),
+							$eprint->value("hoa_ex_oth"),   
+							$eprint->value("hoa_ex_oth_txt")]); 
+
+				#flag that we have compliance && stop loop, unless 
+				#the nofilter flag tells us we want to dump all the 
+				#data on all events and all docs
+				unless($nofilter){
+					$hoa_comp->{$eprintid}=1;
+					last;
+				}
+			}
+		}		
+   });
+}
+
