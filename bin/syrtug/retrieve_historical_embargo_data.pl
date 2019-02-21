@@ -48,6 +48,7 @@ sub get_historical_embargo_data_for_file {
       $current_eprint_revision_number--;
 
     # Get that revision's data.
+    my $current_eprint_revision_local_full_path = $eprint->local_path."/revisions/".$current_eprint_revision_number.".xml";
     ### TODO
     my $current_eprint_revision = {some code here to fetch the correct eprint revision};
     ### TODO
