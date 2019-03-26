@@ -115,8 +115,8 @@ sub get_historical_embargo_data_for_document {
     "satisfy_all" => 1
     # search as staff to get all results
     "staff" => 1,
-    # get only the most recent document revision
-    "custom_order" => "-timestamp",
+    # order chronologically
+    "custom_order" => "timestamp",
     # return results for the selected parent document only
     "filters" => [
       { meta_fields => [ "datasetid" ], value => "eprint", },
@@ -127,11 +127,11 @@ sub get_historical_embargo_data_for_document {
   # Set up a pointer pointing to the most recent history item
   my $history_list_pointer = $history_list->count - 1;
 
-  # Start the loop. Decrement the pointer each time and leave when it passes zero 
-  # OR when we have found $last_nonnull_date_embargo (in the last statement below).
+  # Start the loop. Decrement the pointer each time and leave when it passes zero OR
+  # when we have found $last_nonnull_date_embargo (using the "last" statement below).
   while ($history_list_pointer-- >= 0) do {
 
-    # If we're (still) in the loop, get the history item.
+    # Get the history item.
     my $history_item = $history_list->item( $history_list_pointer );
     # Now we have a history item, get the revision file associated with it.
     my $revision_file = $history_item->get_stored_file( "dataobj.xml" )->get_local_copy;
