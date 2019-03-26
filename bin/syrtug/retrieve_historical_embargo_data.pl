@@ -58,7 +58,7 @@ my $document_list = $document_dataset->search(
   ]
 )
 
-# Set up a pointer pointing to the most recent history item
+# Set up a pointer pointing at the end of the document list
 my $document_list_pointer = $document_list->count - 1;
 
 ### TODO Can we undefine $document_dataset here to free up memory? Would that actually help?
@@ -68,8 +68,7 @@ my $history_dataset = $repo->dataset("history");
 
 # For each candidate document, run get_historical_embargo_data_for_document.
 while ($document_list_pointer-- >= 0) do {
-  ## TODO: is this the right way to call the subroutine?
-  ## N.B. the subroutine returns a message string, so print it!
+  # N.B. the subroutine returns a message string, so print it (to screen, not the CSV).
   print get_historical_embargo_data_for_document( $document_list->item( $document_list_pointer ) )."\n";
 }
 
