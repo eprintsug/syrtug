@@ -134,7 +134,7 @@ sub get_historical_embargo_data_for_document {
     my $history_item = $history_list->item( $history_list_pointer );
     # Now we have a history item, get the revision file associated with it.
     my $revision_file = $history_item->get_stored_file( "dataobj.xml" )->get_local_copy;
-    # If the history item does not have a revision file associated with it, move straight on to the previous history item.
+    # If the history item does not have a revision file associated with it, move straight on to the next (i.e. previous) history item.
     next unless $revision_file;
 
     # If we're still in the loop, we have a revision file. Turn it into XML we can read.
